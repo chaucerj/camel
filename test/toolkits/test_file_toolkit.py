@@ -320,10 +320,12 @@ def test_write_to_file_nested_directory(file_write_toolkit):
 
 
 def test_write_to_file_absolute_path(temp_dir):
-    r"""Test writing to a file using an absolute path."""
-    toolkit = FileToolkit(working_directory="./default")
+    r"""Test writing to a file using an absolute path inside the
+    working directory."""
+    workdir = os.path.join(temp_dir, "workdir")
+    toolkit = FileToolkit(working_directory=workdir)
     content = "Content with absolute path"
-    filename = os.path.join(temp_dir, "absolute_path.txt")
+    filename = os.path.join(workdir, "absolute_path.txt")
 
     result = toolkit.write_to_file("Absolute Path Document", content, filename)
 
@@ -859,3 +861,137 @@ def test_notebook_edit_returns_error_message_for_missing_file(
     )
 
     assert result.startswith("Error:")
+
+
+# ----------------------------------------------
+# Working-directory containment (issues #4354, #4355)
+# ----------------------------------------------
+def test_write_to_file_rejects_parent_escape(file_write_toolkit, temp_dir):
+    r"""A '../' filename must not escape the working directory."""
+    filename = "../escape_write.txt"
+    outside_file = Path(temp_dir) / "escape_write.txt"
+
+    result = file_write_toolkit.write_to_file(
+        "Escape Document", "should not land", filename
+    )
+
+    assert result.startswith("Error:")
+    assert "outside the working directory" in result
+    assert not outside_file.exists()
+
+
+def test_write_to_file_rejects_absolute_outside(file_write_toolkit, temp_dir):
+    r"""An absolute path outside the working directory must be rejected."""
+    outside_file = Path(temp_dir) / "absolute_escape.txt"
+
+    result = file_write_toolkit.write_to_file(
+        "Escape Document",
+        "should not land",
+        str(outside_file),
+    )
+
+    assert result.startswith("Error:")
+    assert "outside the working directory" in result
+    assert not outside_file.exists()
+
+
+def test_write_to_file_rejects_nested_escape(file_write_toolkit, temp_dir):
+    r"""A nested relative path must not climb out of the working directory."""
+    outside_dir = Path(temp_dir) / "sub"
+    filename = "sub/../../escape_nested.txt"
+
+    result = file_write_toolkit.write_to_file(
+        "Escape Document", "should not land", filename
+    )
+
+    assert result.startswith("Error:")
+    assert "outside the working directory" in result
+    assert not outside_dir.exists()
+    assert not (Path(temp_dir) / "escape_nested.txt").exists()
+
+
+def test_write_to_file_allows_relative_inside(file_write_toolkit):
+    r"""Legitimate nested relative writes still succeed."""
+    result = file_write_toolkit.write_to_file(
+        "Inside Document", "inside ok", "nested/still/inside.txt"
+    )
+
+    assert "successfully written" in result
+    resolved = file_write_toolkit._resolve_filepath("nested/still/inside.txt")
+    assert resolved.exists()
+
+
+def test_write_to_file_allows_absolute_inside(file_write_toolkit):
+    r"""Absolute paths that stay inside the working directory still work."""
+    target = file_write_toolkit.working_directory / "inside_absolute.txt"
+
+    result = file_write_toolkit.write_to_file(
+        "Inside Document", "inside ok", str(target)
+    )
+
+    assert "successfully written" in result
+    assert target.exists()
+
+
+def test_read_file_rejects_escape(file_write_toolkit, temp_dir):
+    r"""read_file must not follow paths outside the working directory."""
+    secret = Path(temp_dir) / "credentials.txt"
+    secret.write_text("top secret", encoding="utf-8")
+
+    result = file_write_toolkit.read_file("../credentials.txt")
+
+    assert result.startswith("Error reading file(s)")
+    assert "top secret" not in result
+
+
+def test_edit_file_rejects_escape(file_write_toolkit, temp_dir):
+    r"""edit_file must not modify files outside the working directory."""
+    outside_file = Path(temp_dir) / "outside_edit.txt"
+    outside_file.write_text("original", encoding="utf-8")
+
+    result = file_write_toolkit.edit_file(
+        "../outside_edit.txt", "original", "tampered"
+    )
+
+    assert result.startswith("Error editing file")
+    assert "outside the working directory" in result
+    assert outside_file.read_text(encoding="utf-8") == "original"
+
+
+def test_notebook_edit_cell_rejects_escape(file_write_toolkit, temp_dir):
+    r"""notebook_edit_cell must not modify notebooks outside the
+    working directory."""
+    notebook_path = Path(temp_dir) / "outside.ipynb"
+    _write_notebook(notebook_path)
+
+    result = file_write_toolkit.notebook_edit_cell(
+        notebook_path="../outside.ipynb",
+        new_source="tampered",
+        cell_id="cell-1",
+    )
+
+    assert result.startswith("Error:")
+    assert "outside the working directory" in result
+
+
+@pytest.mark.skipif(os.name == "nt", reason="requires symlink privileges")
+def test_symlink_escape_rejected(file_write_toolkit, temp_dir):
+    r"""A symlink inside the sandbox pointing outward must be rejected."""
+    outside_file = Path(temp_dir) / "symlink_target.txt"
+    outside_file.write_text("secret", encoding="utf-8")
+    link = file_write_toolkit.working_directory / "link.txt"
+    link.symlink_to(outside_file)
+
+    result = file_write_toolkit.read_file("link.txt")
+
+    assert result.startswith("Error reading file(s)")
+    assert "outside the working directory" in result
+
+
+def test_resolve_filepath_raises_on_escape(file_write_toolkit):
+    r"""The resolver itself raises ValueError on escaping paths."""
+    with pytest.raises(ValueError, match="outside the working directory"):
+        file_write_toolkit._resolve_filepath("../escape.txt")
+
+    with pytest.raises(ValueError, match="outside the working directory"):
+        file_write_toolkit._resolve_existing_filepath("../escape.txt")

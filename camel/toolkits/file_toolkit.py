@@ -79,19 +79,51 @@ class FileToolkit(BaseToolkit):
             f": {self.working_directory}, encoding: {default_encoding}"
         )
 
+    def _ensure_within_working_directory(self, path: Path) -> Path:
+        r"""Verify that a resolved path stays inside the working directory.
+
+        ``working_directory`` is the toolkit's confinement boundary: agent
+        callers can influence path arguments, so any resolved path that
+        escapes it (``..`` segments, absolute paths, or symlinks that
+        resolve outward) is rejected instead of being operated on.
+
+        Args:
+            path (Path): A fully resolved candidate path.
+
+        Returns:
+            Path: The same resolved path, when it is contained.
+
+        Raises:
+            ValueError: If the path resolves outside
+                :attr:`working_directory`.
+        """
+        base = Path(os.path.normcase(str(self.working_directory)))
+        candidate = Path(os.path.normcase(str(path)))
+        if candidate != base and not candidate.is_relative_to(base):
+            raise ValueError(
+                f"Refusing to access path outside the working "
+                f"directory: {path} (working directory: "
+                f"{self.working_directory})"
+            )
+        return path
+
     def _resolve_filepath(self, file_path: str) -> Path:
         r"""Convert the given string path to a Path object.
 
         If the provided path is not absolute, it is made relative to the
         default output directory. The filename part is sanitized to replace
         spaces and special characters with underscores, ensuring safe usage
-        in downstream processing.
+        in downstream processing. The resolved path must stay inside
+        :attr:`working_directory`; paths escaping it are rejected.
 
         Args:
             file_path (str): The file path to resolve.
 
         Returns:
             Path: A fully resolved (absolute) and sanitized Path object.
+
+        Raises:
+            ValueError: If the resolved path escapes the working directory.
         """
         path_obj = Path(file_path)
         if not path_obj.is_absolute():
@@ -99,7 +131,8 @@ class FileToolkit(BaseToolkit):
 
         sanitized_filename = self._sanitize_filename(path_obj.name)
         path_obj = path_obj.parent / sanitized_filename
-        return path_obj.resolve()
+        resolved = path_obj.resolve()
+        return self._ensure_within_working_directory(resolved)
 
     def _resolve_search_path(self, path: Optional[str] = None) -> Path:
         r"""Resolve a search directory without sanitizing it."""
@@ -111,11 +144,25 @@ class FileToolkit(BaseToolkit):
         return self.working_directory
 
     def _resolve_existing_filepath(self, file_path: str) -> Path:
-        r"""Resolve a file path without sanitizing the filename."""
+        r"""Resolve a file path without sanitizing the filename.
+
+        The resolved path must stay inside :attr:`working_directory`;
+        paths escaping it are rejected.
+
+        Args:
+            file_path (str): The file path to resolve.
+
+        Returns:
+            Path: A fully resolved (absolute) Path object.
+
+        Raises:
+            ValueError: If the resolved path escapes the working directory.
+        """
         path_obj = Path(file_path)
         if not path_obj.is_absolute():
             path_obj = self.working_directory / path_obj
-        return path_obj.resolve()
+        resolved = path_obj.resolve()
+        return self._ensure_within_working_directory(resolved)
 
     def _tool_error(self, message: str) -> str:
         logger.warning(message)
@@ -1100,7 +1147,10 @@ class FileToolkit(BaseToolkit):
         Returns:
             str: A message indicating success or error details.
         """
-        file_path = self._resolve_filepath(filename)
+        try:
+            file_path = self._resolve_filepath(filename)
+        except ValueError as e:
+            return self._tool_error(str(e))
         file_path.parent.mkdir(parents=True, exist_ok=True)
 
         # Create backup of existing file if backup is enabled
@@ -1504,7 +1554,10 @@ class FileToolkit(BaseToolkit):
         """
         import json
 
-        path = self._resolve_existing_filepath(notebook_path)
+        try:
+            path = self._resolve_existing_filepath(notebook_path)
+        except ValueError as e:
+            return self._tool_error(str(e))
         if not path.exists():
             return self._tool_error(f"Notebook file not found: {path}")
 
