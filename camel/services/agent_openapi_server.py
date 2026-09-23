@@ -13,8 +13,9 @@
 # ========= Copyright 2023-2026 @ CAMEL-AI.org. All Rights Reserved. =========
 
 
+import hashlib
+import hmac
 import secrets
-from hashlib import sha256
 from typing import Any, Dict, List, Optional, Type, Union
 
 from fastapi import APIRouter, Depends, FastAPI, Header, HTTPException
@@ -158,6 +159,9 @@ class ChatAgentOpenAPIServer:
         if api_keys is None:
             api_keys = [secrets.token_urlsafe(32)]
         self.api_keys: List[str] = list(api_keys)
+        # Random per-instance pepper: key ids are HMAC digests, so the
+        # owners map below never exposes anything hash-crackable offline.
+        self._owner_hash_key = secrets.token_bytes(32)
         self._valid_key_ids = {self._key_id(key) for key in self.api_keys}
         self.api_key: Optional[str] = (
             self.api_keys[0] if self.api_keys else None
@@ -167,9 +171,13 @@ class ChatAgentOpenAPIServer:
         self._agent_owners: Dict[str, str] = {}
         self._setup_routes()
 
-    @staticmethod
-    def _key_id(api_key: str) -> str:
+    def _key_id(self, api_key: str) -> str:
         r"""Returns the stable identifier used internally for an API key.
+
+        The id is an HMAC-SHA256 digest keyed by a random per-instance
+        pepper: it is stable for the lifetime of the server (which is all
+        the ownership mapping needs) while the owners map stays useless
+        to anyone attempting offline recovery of the keys.
 
         Args:
             api_key (str): The raw API key as presented by a client.
@@ -177,7 +185,11 @@ class ChatAgentOpenAPIServer:
         Returns:
             str: A hex digest identifying the key.
         """
-        return sha256(api_key.encode("utf-8")).hexdigest()
+        return hmac.new(
+            self._owner_hash_key,
+            api_key.encode("utf-8"),
+            hashlib.sha256,
+        ).hexdigest()
 
     def _verify_api_key(
         self,
