@@ -13,7 +13,6 @@
 # ========= Copyright 2023-2026 @ CAMEL-AI.org. All Rights Reserved. =========
 
 
-import hashlib
 import hmac
 import secrets
 from typing import Any, Dict, List, Optional, Type, Union
@@ -159,37 +158,27 @@ class ChatAgentOpenAPIServer:
         if api_keys is None:
             api_keys = [secrets.token_urlsafe(32)]
         self.api_keys: List[str] = list(api_keys)
-        # Random per-instance pepper: key ids are HMAC digests, so the
-        # owners map below never exposes anything hash-crackable offline.
-        self._owner_hash_key = secrets.token_bytes(32)
-        self._valid_key_ids = {self._key_id(key) for key in self.api_keys}
         self.api_key: Optional[str] = (
             self.api_keys[0] if self.api_keys else None
         )
-        # agent_id -> id of the key that created the agent. Only key
-        # hashes are stored so the raw keys are never duplicated here.
+        # agent_id -> key that created the agent. The configured keys are
+        # already held in memory for authentication, so ownership stores
+        # the key itself; agent-scoped comparisons run in constant time.
         self._agent_owners: Dict[str, str] = {}
         self._setup_routes()
 
-    def _key_id(self, api_key: str) -> str:
-        r"""Returns the stable identifier used internally for an API key.
-
-        The id is an HMAC-SHA256 digest keyed by a random per-instance
-        pepper: it is stable for the lifetime of the server (which is all
-        the ownership mapping needs) while the owners map stays useless
-        to anyone attempting offline recovery of the keys.
+    @staticmethod
+    def _owner_id(presented_key: str) -> str:
+        r"""Returns the owner identity for a presented API key.
 
         Args:
-            api_key (str): The raw API key as presented by a client.
+            presented_key (str): The validated API key.
 
         Returns:
-            str: A hex digest identifying the key.
+            str: The owner identity recorded for agents created by this
+                key.
         """
-        return hmac.new(
-            self._owner_hash_key,
-            api_key.encode("utf-8"),
-            hashlib.sha256,
-        ).hexdigest()
+        return presented_key
 
     def _verify_api_key(
         self,
@@ -214,7 +203,7 @@ class ChatAgentOpenAPIServer:
         if not self.api_keys:
             # Authentication explicitly disabled: every caller shares one
             # anonymous identity (single-user, trusted-network mode).
-            return self._key_id("anonymous")
+            return "anonymous"
 
         presented: Optional[str] = None
         if authorization:
@@ -231,10 +220,10 @@ class ChatAgentOpenAPIServer:
                 "Bearer <key>' or 'X-API-Key: <key>'.",
             )
 
-        key_id = self._key_id(presented)
-        if key_id not in self._valid_key_ids:
-            raise HTTPException(status_code=401, detail="Invalid API key.")
-        return key_id
+        for key in self.api_keys:
+            if hmac.compare_digest(key, presented):
+                return self._owner_id(key)
+        raise HTTPException(status_code=401, detail="Invalid API key.")
 
     def _get_owned_agent(self, agent_id: str, caller: str) -> ChatAgent:
         r"""Returns the requested agent when it belongs to the caller.
@@ -252,7 +241,12 @@ class ChatAgentOpenAPIServer:
                 owners).
         """
         agent = self.agents.get(agent_id)
-        if agent is None or self._agent_owners.get(agent_id) != caller:
+        owner = self._agent_owners.get(agent_id)
+        if (
+            agent is None
+            or owner is None
+            or not hmac.compare_digest(owner, caller)
+        ):
             raise HTTPException(status_code=404, detail="Agent not found.")
         return agent
 
@@ -326,7 +320,8 @@ class ChatAgentOpenAPIServer:
 
             agent_id = request.agent_id
             if agent_id in self.agents:
-                if self._agent_owners.get(agent_id) != caller:
+                owner = self._agent_owners.get(agent_id)
+                if owner is None or not hmac.compare_digest(owner, caller):
                     raise HTTPException(
                         status_code=409,
                         detail=(
