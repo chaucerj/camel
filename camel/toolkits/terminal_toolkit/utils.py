@@ -109,6 +109,28 @@ DANGEROUS_COMMANDS: List[str] = [
     'rmmod',
     'insmod',
     'lsmod',
+    # Code interpreters: a single invocation can execute arbitrary code
+    # that static shell screening cannot inspect, e.g.
+    # `python -c "import os; os.system('...')"` (issue #4347)
+    'python',
+    'python2',
+    'python3',
+    'pypy',
+    'pypy3',
+    'ipython',
+    'node',
+    'nodejs',
+    'deno',
+    'bun',
+    'perl',
+    'ruby',
+    'php',
+    'lua',
+    'luajit',
+    'julia',
+    'rscript',
+    'pwsh',
+    'powershell',
 ]
 
 

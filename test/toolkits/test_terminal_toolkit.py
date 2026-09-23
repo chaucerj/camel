@@ -594,3 +594,81 @@ def test_console_approval_interactive(monkeypatch, response, expected):
         terminal_toolkit_module._default_console_approval("echo test")
         is expected
     )
+
+
+# ----------------------------------------------
+# Code-interpreter blocking in safe mode
+# (issue #4347)
+# ----------------------------------------------
+@pytest.mark.parametrize(
+    "command",
+    [
+        'python -c "import os; os.system(\'echo pwned > /tmp/x\')"',
+        'python3 -c "import os; os.system(\'echo pwned\')"',
+        'node -e "require(\'fs\').writeFileSync(\'/tmp/x\', \'pwned\')"',
+        'perl -e \'print "pwned"\'',
+        'ruby -e "puts \'pwned\'"',
+        'php -r "echo \'pwned\';"',
+        'python script.py',
+        'pwsh -Command "Write-Output pwned"',
+    ],
+)
+def test_sanitize_command_blocks_code_interpreters(temp_dir, command):
+    """Script interpreters can execute arbitrary unscreenable code and
+    must be rejected by safe mode (issue #4347)."""
+    is_safe, message = sanitize_command(command, working_dir=str(temp_dir))
+    assert not is_safe
+    assert "blocked for safety" in message.lower()
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        'bash -c "python -c \'import os; os.system("id")\'"',
+        'sh -c "python3 -c \'import os\'"',
+    ],
+)
+def test_sanitize_command_blocks_nested_interpreter_payloads(
+    temp_dir, command
+):
+    """Interpreters hidden inside shell -c wrappers must be rejected too."""
+    is_safe, message = sanitize_command(command, working_dir=str(temp_dir))
+    assert not is_safe
+
+
+def test_sanitize_command_blocks_interpreter_after_operator(temp_dir):
+    """Chained interpreters (e.g. `ls && python -c ...`) must be blocked."""
+    is_safe, _ = sanitize_command(
+        'ls && python -c "import os"',
+        working_dir=str(temp_dir),
+    )
+    assert not is_safe
+
+
+def test_sanitize_command_allows_python_as_argument(temp_dir):
+    """Mentioning an interpreter as an argument must not be a false
+    positive (quote-stripped and mid-segment occurrences stay allowed)."""
+    for command in [
+        "echo 'python'",
+        "grep python requirements.txt",
+        "cat interpreter_list.txt",
+    ]:
+        is_safe, message = sanitize_command(command, working_dir=str(temp_dir))
+        assert is_safe, (command, message)
+
+
+def test_interpreter_allowed_in_whitelist_mode(temp_dir):
+    """Whitelist mode keeps its own semantics: an explicitly allowed
+    interpreter stays allowed."""
+    is_safe, _ = sanitize_command(
+        'python -c "print(1)"',
+        working_dir=str(temp_dir),
+        allowed_commands={"python"},
+    )
+    assert is_safe
+
+
+def test_interpreter_in_dangerous_commands_public_list():
+    """The public DANGEROUS_COMMANDS list carries the interpreters."""
+    for name in ("python", "python3", "node", "perl", "ruby", "php"):
+        assert name in DANGEROUS_COMMANDS
